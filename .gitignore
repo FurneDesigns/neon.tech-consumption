@@ -70,6 +70,8 @@ ehthumbs.db
 Thumbs.db
 Desktop.ini
 $RECYCLE.BIN/
+# Windows alternate data streams created by WSL when copying from NTFS
+*:Zone.Identifier
 
 # ----------------------------------------------------------------------------
 # Logs and runtime
