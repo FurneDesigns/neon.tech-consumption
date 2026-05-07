@@ -1,0 +1,33 @@
+{
+  "name": "neon-consumption",
+  "version": "0.1.0",
+  "description": "Local dashboard to visualize Neon Postgres usage per project and per endpoint, calibrate costs against the real invoice, and build month-over-month history — without needing the Scale plan.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node --watch server.js",
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "furnedesigns",
+    "url": "https://furnedesigns.com"
+  },
+  "homepage": "https://furnedesigns.com",
+  "keywords": [
+    "neon",
+    "postgres",
+    "vercel",
+    "consumption",
+    "dashboard",
+    "billing",
+    "cost-tracking"
+  ]
+}

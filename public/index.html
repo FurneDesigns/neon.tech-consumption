@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Neon Consumption</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <meta name="theme-color" content="#6366f1">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #f6f7fb;
+      --card: #ffffff;
+      --border: #e2e8f0;
+      --border-strong: #cbd5e1;
+      --text: #0f172a;
+      --muted: #64748b;
+      --muted-strong: #475569;
+      --accent: #4f46e5;
+      --accent-hover: #4338ca;
+      --good: #10b981;
+      --warn: #f59e0b;
+      --bad: #ef4444;
+      --row-hover: #f1f5f9;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; }
+    /* Make the global [hidden] attribute always win over our display: flex etc. */
+    [hidden] { display: none !important; }
+    body {
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .container { max-width: 1280px; margin: 0 auto; padding: 22px 24px 40px; }
+    header {
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 16px; margin-bottom: 18px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .brand-mark {
+      width: 32px; height: 32px; border-radius: 9px;
+      background: linear-gradient(135deg, #6366f1, #06b6d4);
+      box-shadow: 0 4px 12px -2px rgba(99, 102, 241, 0.45), 0 1px 2px rgba(0,0,0,0.06);
+      display: inline-flex; align-items: center; justify-content: center;
+      color: white;
+    }
+    .brand-mark svg { width: 18px; height: 18px; }
+    .icon { width: 14px; height: 14px; vertical-align: -2px; }
+    .icon-btn { display: inline-flex; align-items: center; gap: 6px; }
+    h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.01em; }
+    .header-actions { display: flex; gap: 8px; align-items: center; }
+    button {
+      font: inherit; cursor: pointer; border: 0;
+      background: var(--accent); color: white;
+      padding: 9px 14px; border-radius: 8px; font-weight: 600;
+      transition: background 0.15s;
+    }
+    button:hover:not(:disabled) { background: var(--accent-hover); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.secondary { background: white; color: var(--text); border: 1px solid var(--border-strong); }
+    button.secondary:hover:not(:disabled) { background: var(--row-hover); }
+    button.ghost { background: transparent; color: var(--muted-strong); padding: 6px 10px; }
+    button.ghost:hover:not(:disabled) { background: var(--row-hover); color: var(--text); }
+    button.danger { background: transparent; color: var(--bad); padding: 4px 8px; }
+    button.danger:hover:not(:disabled) { background: #fee2e2; }
+
+    nav.orgs {
+      display: flex; gap: 4px; flex-wrap: wrap;
+      padding-bottom: 14px; margin-bottom: 18px;
+      border-bottom: 1px solid var(--border);
+    }
+    .org-btn {
+      background: transparent; color: var(--muted-strong);
+      padding: 7px 14px; border-radius: 999px; font-weight: 500; font-size: 13px;
+      border: 1px solid var(--border);
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .org-btn:hover:not(:disabled) { background: white; color: var(--text); }
+    .org-btn.active { background: var(--text); color: white; border-color: var(--text); }
+    .org-btn.add { color: var(--muted); border-style: dashed; }
+
+    nav.tabs {
+      display: flex; gap: 4px; border-bottom: 1px solid var(--border);
+      margin-bottom: 18px; overflow-x: auto;
+    }
+    .tab-btn {
+      background: transparent; color: var(--muted);
+      padding: 9px 14px; border-radius: 0; font-weight: 500; font-size: 13px;
+      border-bottom: 2px solid transparent; margin-bottom: -1px;
+      white-space: nowrap;
+    }
+    .tab-btn:hover:not(:disabled) { background: transparent; color: var(--text); }
+    .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 12px; padding: 18px; margin-bottom: 16px;
+    }
+    .card h2 {
+      margin: 0 0 4px;
+      font-size: 14px; font-weight: 600; color: var(--text);
+      letter-spacing: 0.01em;
+    }
+    .card-note { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; font-weight: 600; color: var(--muted-strong);
+         padding: 9px 10px; border-bottom: 1px solid var(--border); white-space: nowrap;
+         background: #fafbfc; }
+    td { padding: 9px 10px; border-bottom: 1px solid #f1f5f9; }
+    tbody tr:hover { background: var(--row-hover); }
+    tr.clickable { cursor: pointer; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted-strong); }
+    .badge {
+      display: inline-block; padding: 2px 8px; border-radius: 999px;
+      font-size: 11px; font-weight: 600;
+    }
+    .badge.active { background: #dcfce7; color: #15803d; }
+    .badge.idle { background: #f1f5f9; color: #64748b; }
+    .badge.warn { background: #fef3c7; color: #92400e; }
+    .badge.plan { background: #ede9fe; color: #5b21b6; text-transform: lowercase; }
+
+    .stat-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 12px; margin-bottom: 16px;
+    }
+    .stat { background: var(--card); border: 1px solid var(--border);
+            border-radius: 12px; padding: 14px 16px; }
+    .stat-label { color: var(--muted); font-size: 12px; }
+    .stat-value { font-size: 22px; font-weight: 700; margin-top: 2px; letter-spacing: -0.01em; }
+    .stat-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+    .stat-accent .stat-value { color: var(--accent); }
+
+    .chart-wrap { position: relative; height: 280px; }
+    .chart-wrap.tall { height: 360px; }
+
+    .toast {
+      position: fixed; bottom: 20px; right: 20px;
+      background: var(--text); color: white;
+      padding: 12px 16px; border-radius: 8px;
+      font-size: 13px; max-width: 400px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.15);
+      transition: opacity 0.3s, transform 0.3s; z-index: 1000;
+    }
+    .toast.error { background: var(--bad); }
+    .toast.hidden { opacity: 0; transform: translateY(10px); pointer-events: none; }
+    .empty { color: var(--muted); padding: 40px; text-align: center; }
+    .spinner {
+      display: inline-block; width: 12px; height: 12px;
+      border: 2px solid currentColor; border-right-color: transparent;
+      border-radius: 50%; animation: spin 0.7s linear infinite;
+      vertical-align: -2px; margin-right: 6px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Modal */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45);
+      display: flex; align-items: flex-start; justify-content: center;
+      padding: 60px 20px; z-index: 100;
+      transition: opacity 0.2s;
+    }
+    .modal-overlay.hidden { opacity: 0; pointer-events: none; }
+    .modal {
+      background: var(--card); border-radius: 14px;
+      width: 100%; max-width: 640px;
+      max-height: calc(100vh - 120px); overflow: auto;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+    }
+    .modal-head {
+      padding: 18px 22px; border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .modal-head h2 { margin: 0; font-size: 16px; }
+    .modal-body { padding: 18px 22px; }
+    .modal-section { margin-bottom: 22px; }
+    .modal-section:last-child { margin-bottom: 0; }
+    .modal-section h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted-strong); text-transform: uppercase; letter-spacing: 0.04em; }
+
+    .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+    .field label { font-size: 12px; color: var(--muted-strong); font-weight: 500; }
+    .field input, .field select {
+      font: inherit; padding: 8px 10px;
+      border: 1px solid var(--border-strong); border-radius: 7px; background: white;
+    }
+    .field input:focus, .field select:focus {
+      outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent);
+    }
+    .input-row { display: flex; gap: 8px; }
+    .input-row input { flex: 1; }
+
+    .org-row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px; padding: 8px 12px; border: 1px solid var(--border);
+      border-radius: 8px; margin-bottom: 6px; background: #fafbfc;
+    }
+    .org-row .info { flex: 1; min-width: 0; }
+    .org-row .info .name { font-weight: 600; font-size: 13px; }
+    .org-row .info .id { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); }
+
+    .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+
+    form.invoice-form {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px; margin-bottom: 12px;
+    }
+    form.invoice-form label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted-strong); }
+    form.invoice-form input {
+      font: inherit; padding: 7px 9px; border: 1px solid var(--border-strong);
+      border-radius: 6px; margin-top: 3px;
+    }
+    form.invoice-form input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+    form.invoice-form .full { grid-column: 1 / -1; }
+
+    .helper { color: var(--muted-strong); font-size: 12px; }
+    .helper code { background: var(--row-hover); padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+    .config-warn {
+      background: #fef3c7; border: 1px solid #fde68a; color: #92400e;
+      padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 13px;
+      display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    }
+    .config-warn button { background: #92400e; padding: 6px 12px; font-size: 12px; }
+    .config-warn button:hover:not(:disabled) { background: #78350f; }
+
+    .row-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 720px) { .row-2col { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <!-- lucide gauge -->
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m12 14 4-4"/>
+            <path d="M3.34 19a10 10 0 1 1 17.32 0"/>
+          </svg>
+        </div>
+        <h1>Neon Consumption</h1>
+      </div>
+      <div class="header-actions">
+        <button id="settings-btn" class="secondary icon-btn" type="button">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+          Settings
+        </button>
+        <button id="refresh" class="icon-btn" type="button">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+            <path d="M21 3v5h-5"/>
+            <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+            <path d="M8 16H3v5"/>
+          </svg>
+          Refresh
+        </button>
+      </div>
+    </header>
+
+    <div id="config-warn" class="config-warn" hidden>
+      <span id="config-warn-text">No API key or orgs configured. Open <b>Settings</b> to add them.</span>
+      <button id="open-settings-from-warn" type="button">Open Settings</button>
+    </div>
+
+    <nav id="orgs-nav" class="orgs"></nav>
+    <nav id="tabs" class="tabs"></nav>
+    <main id="content"></main>
+  </div>
+
+  <!-- Settings modal -->
+  <div id="modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <h2>Settings</h2>
+        <button class="ghost" type="button" id="close-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-section">
+          <h3>Neon API key</h3>
+          <div class="field">
+            <label for="api-key-input">Stored locally in <code>config.json</code> (gitignored)</label>
+            <div class="input-row">
+              <input id="api-key-input" type="password" placeholder="napi_...">
+              <button id="save-api-key" type="button">Save key</button>
+            </div>
+          </div>
+          <div id="api-key-status" class="helper"></div>
+        </div>
+
+        <div class="modal-section">
+          <h3>Organizations</h3>
+          <div id="orgs-list"></div>
+          <div class="field" style="margin-top: 10px;">
+            <label for="org-id-input">Add organization (paste org ID)</label>
+            <div class="input-row">
+              <input id="org-id-input" type="text" placeholder="org-xxxxxx-xxxxxxxx">
+              <button id="add-org" type="button">Add</button>
+            </div>
+          </div>
+          <div class="helper" style="margin-top: 6px;">
+            With the API key set, run
+            <code>curl -H "Authorization: Bearer $KEY" https://console.neon.tech/api/v2/users/me/organizations</code>
+            to list your org IDs.
+          </div>
+        </div>
+
+        <div class="modal-section">
+          <h3>Rates</h3>
+          <div class="helper">
+            Neon doesn't expose pricing via API. Each org's rates are auto-detected
+            from its <code>plan</code> and <code>managed_by</code> fields (e.g. Vercel-managed Launch ≠ Neon Launch).
+            For exact precision, click <b>Calibrate</b> next to an org or in the Invoices tab — it derives
+            the per-unit rates from a saved real invoice.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script type="module" src="/app.js?v=7"></script>
+</body>
+</html>
