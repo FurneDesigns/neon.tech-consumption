@@ -246,6 +246,44 @@ async function refreshAll() {
   }
 }
 
+async function importHistory() {
+  const btn = $('#import-history');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Importing…';
+  }
+  try {
+    const body = activeOrgId !== '__all__' ? { org_id: activeOrgId } : {};
+    const s = await api('/api/import-history', { method: 'POST', body: JSON.stringify(body) });
+    state.data = s.data;
+    const totals = (s.summary || []).reduce((a, x) => ({
+      inv: a.inv + (x.invoices_added || 0),
+      snap: a.snap + (x.snapshots_added || 0),
+    }), { inv: 0, snap: 0 });
+    if (s.errors?.length) {
+      // Plan-gated orgs are the common case: show their friendly note rather
+      // than the raw error so users understand it's not a bug.
+      const notes = s.errors.filter(e => e.note).map(e => e.note);
+      const others = s.errors.filter(e => !e.note).map(e => `${e.org_id}: ${e.error}`);
+      const msg = [...notes, ...others].join(' · ') || s.errors.map(e => e.org_id).join(', ');
+      toast(`Import: ${msg}`, true);
+      console.error('Import errors', s.errors);
+    } else if (totals.inv === 0 && totals.snap === 0) {
+      toast('Nothing to import (history already up to date)');
+    } else {
+      toast(`Imported ${totals.inv} estimated invoice${totals.inv === 1 ? '' : 's'} and ${totals.snap} snapshot${totals.snap === 1 ? '' : 's'}`);
+    }
+    render();
+  } catch (e) {
+    toast(`Error: ${e.message}`, true);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Import history';
+    }
+  }
+}
+
 // ============================================================================
 // Computations
 // ============================================================================
@@ -811,14 +849,14 @@ function renderHistory(parent) {
   const snaps = snapshotsForOrg(activeOrgId);
   const invs = invoicesForOrg(activeOrgId);
   if (!snaps.length && !Object.keys(invs).length) {
-    return renderEmpty(parent, 'No history yet — click Refresh to capture the first snapshot.');
+    return renderEmpty(parent, 'No history yet — click Refresh to capture the first snapshot, or Import history to backfill past months.', '↓ Import history', importHistory);
   }
   const months = [...new Set([...snaps.map(s => s.billing_month).filter(Boolean), ...Object.keys(invs)])].sort();
 
   // Chart 1: estimated cost vs invoice total per month
   const card1 = el('div', { class: 'card' });
   card1.append(el('h2', {}, 'Estimated vs invoice — monthly'));
-  card1.append(el('div', { class: 'card-note' }, 'Compute + storage estimated from API snapshots, vs the real total from invoices stored under Invoices tab.'));
+  card1.append(el('div', { class: 'card-note' }, 'Compute + storage estimated from API snapshots, vs the total from invoices stored under Invoices tab. Imported invoices are also estimates (badged "est") — paste the real invoice to replace them.'));
   const wrap1 = el('div', { class: 'chart-wrap' });
   card1.append(wrap1);
   parent.append(card1);
@@ -928,7 +966,12 @@ function renderHistory(parent) {
       el('td', { class: 'num' }, snap ? fmt.money(cost.compute) : '—'),
       el('td', { class: 'num' }, snap ? fmt.money(cost.storage) : '—'),
       el('td', { class: 'num' }, snap ? el('b', {}, fmt.money(estTotal)) : '—'),
-      el('td', { class: 'num' }, inv ? el('b', {}, fmt.money(invTotal)) : '—'),
+      el('td', { class: 'num' }, inv
+        ? el('span', {}, [
+            el('b', {}, fmt.money(invTotal)),
+            inv._estimated ? el('span', { class: 'badge est', style: { marginLeft: '6px' }, title: 'API estimate, not a real billed invoice' }, 'est') : null,
+          ])
+        : '—'),
       el('td', { class: 'num', style: { color: diff > 0 ? 'var(--bad)' : (diff < 0 ? 'var(--good)' : 'inherit') } },
         snap && inv ? (diff >= 0 ? '+' : '') + fmt.money(diff) : '—'),
       el('td', { class: 'mono' }, snap ? new Date(snap.captured_at).toLocaleDateString('en-US') : '—'),
@@ -937,6 +980,141 @@ function renderHistory(parent) {
   t.append(tb);
   card3.append(t);
   parent.append(card3);
+
+  renderEndpointHistorySection(parent, snaps);
+}
+
+// Build a {months, endpoints} matrix from snapshots that carry per-endpoint
+// detail. Estimated/imported snapshots have empty endpoint arrays — they're
+// silently skipped because they'd contribute null rows.
+function buildEndpointMatrix(snaps) {
+  const months = [];
+  const seen = new Set();
+  const endpoints = {};
+  for (const snap of snaps) {
+    const m = snap.billing_month;
+    if (!m) continue;
+    if (!seen.has(m)) { seen.add(m); months.push(m); }
+    for (const p of (snap.projects || [])) {
+      for (const ep of (p.endpoints || [])) {
+        const k = ep.endpoint_id;
+        if (!k) continue;
+        const e = endpoints[k] ||= {
+          id: k, project: p.name, branch: ep.branch_name,
+          byMonth: {}, total: 0,
+        };
+        e.byMonth[m] = {
+          cuHmin: Number(ep.cu_h_at_min) || 0,
+          cuHmax: Number(ep.cu_h_at_max) || 0,
+          uptimeSec: Number(ep.uptime_sec) || 0,
+          minCu: ep.min_cu, maxCu: ep.max_cu,
+          state: ep.current_state,
+        };
+        e.total += Number(ep.cu_h_at_min) || 0;
+        e.project = p.name;            // latest wins on rename
+        e.branch = ep.branch_name;
+      }
+    }
+  }
+  return { months: months.sort(), endpoints };
+}
+
+function renderEndpointHistorySection(parent, snaps) {
+  const { months, endpoints } = buildEndpointMatrix(snaps);
+  const list = Object.values(endpoints).sort((a, b) => b.total - a.total);
+  if (!list.length || !months.length) return;
+
+  const card = el('div', { class: 'card' });
+  card.append(el('h2', {}, 'Per-endpoint trend'));
+  card.append(el('div', { class: 'card-note' },
+    `Compute hours per endpoint across ${months.length} captured month${months.length === 1 ? '' : 's'}. ` +
+    `Refresh once per billing cycle to grow this history — the consumption API doesn't expose per-endpoint detail, so only live snapshots count here.`));
+
+  // Top-10 multi-line chart, only if we have at least 2 months to draw a trend.
+  const top = list.slice(0, 10);
+  if (months.length >= 2 && top.length) {
+    const wrap = el('div', { class: 'chart-wrap tall' });
+    card.append(wrap);
+    const cv = el('canvas');
+    wrap.append(cv);
+    const datasets = top.map((e, i) => ({
+      label: `${e.branch || '(no branch)'} · ${e.project || ''}`.trim(),
+      data: months.map(m => e.byMonth[m]?.cuHmin ?? null),
+      borderColor: colorFor(i),
+      backgroundColor: colorFor(i) + '22',
+      borderWidth: 2.5,
+      tension: 0.3,
+      spanGaps: true,
+      pointRadius: 3,
+      pointBackgroundColor: '#fff',
+      pointBorderColor: colorFor(i),
+      pointBorderWidth: 2,
+      pointHoverRadius: 6,
+    }));
+    // eslint-disable-next-line no-undef
+    activeCharts.push(new Chart(cv, {
+      type: 'line',
+      data: { labels: months, datasets },
+      options: chartTheme({
+        scales: {
+          x: { grid: { display: false } },
+          y: { beginAtZero: true, grid: { color: 'rgba(15,23,42,0.05)' }, ticks: { callback: v => `${v} h` } },
+        },
+        plugins: {
+          tooltip: { callbacks: { label: c => c.parsed.y == null ? `${c.dataset.label}: —` : `${c.dataset.label}: ${fmt.num(c.parsed.y, 2)} h` } },
+        },
+      }),
+    }));
+  }
+
+  // Detail table — wraps in scroller so wide histories don't break layout.
+  const t = el('table');
+  t.append(el('thead', {}, el('tr', {}, [
+    th('Endpoint'), th('Branch'), th('Project'),
+    ...months.map(m => th(m, 'num')),
+    th('Total', 'num'), th('Δ vs prev', 'num'),
+  ])));
+  const tb = el('tbody');
+  for (const e of list) {
+    const cells = [
+      el('td', { class: 'mono', title: e.id }, e.id.length > 18 ? e.id.slice(0, 16) + '…' : e.id),
+      el('td', {}, e.branch || '—'),
+      el('td', {}, e.project || '—'),
+    ];
+    for (const m of months) {
+      const d = e.byMonth[m];
+      cells.push(el('td', { class: 'num', style: d ? null : { color: 'var(--muted)' } },
+        d ? fmt.num(d.cuHmin, 2) : '—'));
+    }
+    cells.push(el('td', { class: 'num' }, el('b', {}, fmt.num(e.total, 2))));
+
+    // Δ from the most recent two months that both have data.
+    const present = months.map(m => e.byMonth[m]?.cuHmin).map(v => (v == null ? null : v));
+    let lastIdx = -1, prevIdx = -1;
+    for (let i = present.length - 1; i >= 0; i--) {
+      if (present[i] == null) continue;
+      if (lastIdx === -1) { lastIdx = i; continue; }
+      prevIdx = i; break;
+    }
+    let dText = '—', dColor = 'inherit';
+    if (lastIdx >= 0 && prevIdx >= 0) {
+      const a = present[prevIdx], b = present[lastIdx];
+      if (a === 0 && b > 0) { dText = '↑ new'; dColor = 'var(--bad)'; }
+      else if (a > 0) {
+        const pct = (b - a) / a * 100;
+        const arrow = pct > 0.5 ? '↑ ' : pct < -0.5 ? '↓ ' : '· ';
+        dText = `${arrow}${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`;
+        dColor = pct > 5 ? 'var(--bad)' : pct < -5 ? 'var(--good)' : 'inherit';
+      } else { dText = '0%'; }
+    }
+    cells.push(el('td', { class: 'num', style: { color: dColor, whiteSpace: 'nowrap' } }, dText));
+    tb.append(el('tr', {}, cells));
+  }
+  t.append(tb);
+  const scroll = el('div', { style: { overflowX: 'auto' } });
+  scroll.append(t);
+  card.append(scroll);
+  parent.append(card);
 }
 
 function renderInvoices(parent) {
@@ -970,10 +1148,23 @@ function renderInvoices(parent) {
   parent.append(card);
 
   const list = el('div', { class: 'card' });
-  list.append(el('h2', {}, 'Saved invoices'));
+  const head = el('div', { style: { display: 'flex', alignItems: 'center', gap: '12px' } }, [
+    el('h2', { style: { margin: 0, flex: 1 } }, 'Saved invoices'),
+    el('button', {
+      class: 'secondary', type: 'button',
+      style: { padding: '6px 12px', fontSize: '12px' },
+      title: 'Backfill estimated invoices for past months from the Neon API',
+      onclick: importHistory,
+    }, '↓ Import past months'),
+  ]);
+  list.append(head);
   const months = Object.keys(invs).sort();
   if (!months.length) {
-    list.append(el('div', { class: 'empty' }, 'No invoices saved yet.'));
+    list.append(el('div', { class: 'empty' }, [
+      'No invoices saved yet.',
+      el('br'),
+      el('span', { style: { fontSize: '12px' } }, 'Paste a real invoice above, or click ↓ Import past months for API estimates.'),
+    ]));
   } else {
     const t = el('table');
     t.append(el('thead', {}, el('tr', {}, [
@@ -983,8 +1174,16 @@ function renderInvoices(parent) {
     const tb = el('tbody');
     for (const m of months) {
       const inv = invs[m];
+      const estimated = !!inv._estimated;
       tb.append(el('tr', {}, [
-        el('td', {}, m),
+        el('td', {}, [
+          m,
+          estimated ? el('span', {
+            class: 'badge est',
+            style: { marginLeft: '6px' },
+            title: 'Imported estimate from /consumption_history — replace by pasting the real invoice above',
+          }, 'estimated') : null,
+        ]),
         el('td', { class: 'num' }, fmt.money(inv.compute_cost || 0)),
         el('td', { class: 'num' }, fmt.money(inv.storage_root_cost || 0)),
         el('td', { class: 'num' }, fmt.money(inv.storage_child_cost || 0)),
@@ -994,9 +1193,12 @@ function renderInvoices(parent) {
         el('td', { class: 'num', style: { whiteSpace: 'nowrap' } }, [
           el('button', {
             class: 'secondary', type: 'button',
-            title: 'Use this invoice to calibrate the org\'s rates',
+            disabled: estimated,
+            title: estimated
+              ? 'Calibration uses real billed numbers — this row is itself an API estimate'
+              : 'Use this invoice to calibrate the org\'s rates',
             style: { padding: '4px 8px', fontSize: '11px', marginRight: '4px' },
-            onclick: () => calibrateOrg(activeOrgId, m),
+            onclick: estimated ? null : (() => calibrateOrg(activeOrgId, m)),
           }, 'Calibrate'),
           el('button', {
             class: 'danger', type: 'button',
@@ -1177,6 +1379,7 @@ async function resetOrgRates(orgId) {
 // Init
 // ============================================================================
 $('#refresh').addEventListener('click', refreshAll);
+$('#import-history').addEventListener('click', importHistory);
 $('#settings-btn').addEventListener('click', openSettings);
 $('#open-settings-from-warn').addEventListener('click', openSettings);
 $('#close-modal').addEventListener('click', closeSettings);

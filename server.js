@@ -200,6 +200,91 @@ async function neonGet(reqPath, params, apiKey) {
   return r.json();
 }
 
+// Pulls account-level monthly consumption history (one entry per billing
+// period). Used to back-fill estimated invoices for months we never captured.
+async function listConsumptionAccount(orgId, fromIso, toIso, apiKey) {
+  const data = await neonGet('/consumption_history/account', {
+    from: fromIso, to: toIso, granularity: 'monthly', org_id: orgId,
+  }, apiKey);
+  return data.periods || [];
+}
+
+// First-of-each-UTC-month boundaries between two ISO dates, oldest first.
+function monthlyBoundariesAsc(fromIso, toIso) {
+  const start = new Date(fromIso);
+  const end = new Date(toIso);
+  const out = [];
+  const cur = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+  while (cur < end) {
+    out.push(cur.toISOString());
+    cur.setUTCMonth(cur.getUTCMonth() + 1);
+  }
+  return out;
+}
+
+// The /consumption_history endpoints reject `from` dates outside both the
+// global lower bound (2024-03-01) AND this specific org's data window (406
+// "outside the boundaries"). On top of that, the endpoint is plan-gated and
+// returns 403 only once `from` lands inside the data window. So we probe
+// month-by-month forward and report the first definitive verdict we see.
+async function probeAccountHistory(orgId, fromIso, toIso, apiKey) {
+  const candidates = monthlyBoundariesAsc(fromIso, toIso);
+  let sawBoundary = false;
+  for (const from of candidates) {
+    try {
+      const periods = await listConsumptionAccount(orgId, from, toIso, apiKey);
+      return { kind: 'ok', from, periods };
+    } catch (e) {
+      if (/Scale plans and above/i.test(e.message)) return { kind: 'plan_required', error: e };
+      if (/outside the boundaries/i.test(e.message)) { sawBoundary = true; continue; }
+      // Unknown error — bubble up rather than silently swallowing.
+      throw e;
+    }
+  }
+  return { kind: sawBoundary ? 'no_data' : 'unknown' };
+}
+
+// Per-project monthly consumption (paginated).
+async function listConsumptionProjects(orgId, fromIso, toIso, apiKey) {
+  const out = [];
+  let cursor = null;
+  for (let i = 0; i < 50; i++) {
+    const params = { from: fromIso, to: toIso, granularity: 'monthly', org_id: orgId, limit: 100 };
+    if (cursor) params.cursor = cursor;
+    const data = await neonGet('/consumption_history/projects', params, apiKey);
+    out.push(...(data.projects || []));
+    cursor = data.pagination?.cursor;
+    if (!cursor) break;
+  }
+  return out;
+}
+
+function monthFromIsoUtc(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+// Convert one ConsumptionHistoryPerTimeframe (v1) to billable units.
+// data_storage_bytes_hour is bytes·hour; dividing by hours yields the
+// time-weighted average bytes, which is what $/GB-month bills against.
+function timeframeToUnits(tf) {
+  const cpuH = (Number(tf.compute_time_seconds) || 0) / 3600;
+  const start = new Date(tf.timeframe_start);
+  const end = new Date(tf.timeframe_end);
+  const hours = Math.max(1, (end - start) / 3600000);
+  const avgStorageBytes = (Number(tf.data_storage_bytes_hour) || 0) / hours;
+  return {
+    cpuH,
+    activeSec: Number(tf.active_time_seconds) || 0,
+    cpuSec: Number(tf.compute_time_seconds) || 0,
+    avgStorageBytes,
+    avgStorageGB: avgStorageBytes / 1024 ** 3,
+    hours,
+  };
+}
+
 async function listOperations(projectId, sinceDate, apiKey) {
   const out = [];
   let cursor = null;
@@ -545,6 +630,172 @@ app.post('/api/invoice', async (req, res) => {
   }
 });
 
+// Backfill estimated invoices + synthetic snapshots from the Neon
+// consumption_history API. Manual (non-estimated) invoices and live
+// snapshots are never overwritten.
+app.post('/api/import-history', async (req, res) => {
+  try {
+    const config = await loadConfig();
+    if (!config.api_key) return res.status(400).json({ error: 'Missing API key' });
+    const onlyOrg = req.body?.org_id;
+    const orgsToImport = onlyOrg
+      ? config.orgs.filter(o => o.id === onlyOrg)
+      : config.orgs;
+    if (!orgsToImport.length) return res.status(400).json({ error: 'No orgs configured' });
+
+    // Neon's consumption_history API rejects "from" earlier than 2024-03-01
+    // (per the API's own 400 message). Pin to that lower bound and let it
+    // return whatever periods exist for this org within the window.
+    const fromIso = '2024-03-01T00:00:00Z';
+    const toIso = new Date().toISOString();
+
+    let data = await loadData();
+    data = await migrateLegacyIfNeeded(config, data);
+    const errors = [];
+    const summary = [];
+
+    for (const o of orgsToImport) {
+      try {
+        // Probe to find a valid `from` (or learn the org is plan-gated).
+        const probe = await probeAccountHistory(o.id, fromIso, toIso, config.api_key);
+        if (probe.kind === 'plan_required') {
+          errors.push({
+            org_id: o.id,
+            error: 'plan_required',
+            plan: o.plan || null,
+            note: `The Neon /consumption_history API is gated to Scale, Business and Enterprise plans. This org is on "${o.plan || 'unknown'}" — past months can't be auto-imported. Tip: paste the real invoice line items in the form above to get exact numbers.`,
+          });
+          continue;
+        }
+        if (probe.kind === 'no_data') {
+          errors.push({
+            org_id: o.id,
+            error: 'no_data',
+            note: `Neon returned no consumption history for this org in any month from ${fromIso.slice(0, 10)} onward.`,
+          });
+          continue;
+        }
+        if (probe.kind !== 'ok') {
+          errors.push({ org_id: o.id, error: `unexpected probe result: ${probe.kind}` });
+          continue;
+        }
+
+        const acctPeriods = probe.periods;
+        const projsResp = await neonGet('/projects', { org_id: o.id, limit: 100 }, config.api_key);
+        const projNames = Object.fromEntries((projsResp.projects || []).map(p => [p.id, p.name]));
+
+        let projHist = [];
+        if (acctPeriods.length) {
+          const earliestPeriodStart = acctPeriods
+            .map(p => p.period_start)
+            .filter(Boolean)
+            .sort()[0];
+          try {
+            projHist = await listConsumptionProjects(o.id, earliestPeriodStart, toIso, config.api_key);
+          } catch (e) {
+            // Per-project breakdown is best-effort — the invoice estimates
+            // still work without it.
+            console.warn(`[import-history] per-project history failed for ${o.id}: ${e.message}`);
+          }
+        }
+
+        const bucket = ensureOrgBucket(data, o.id);
+        let invoicesAdded = 0;
+        let snapshotsAdded = 0;
+        const months = [];
+
+        for (const period of acctPeriods) {
+          const month = monthFromIsoUtc(period.period_start);
+          if (!month) continue;
+          months.push(month);
+          const planForPeriod = period.period_plan || o.plan;
+          const ratesForPeriod = effectiveRates({
+            plan: planForPeriod,
+            managed_by: o.managed_by,
+            rates_override: o.rates_override,
+          });
+          // monthly granularity → exactly one timeframe per period
+          const tf = (period.consumption || [])[0];
+          if (!tf) continue;
+          const u = timeframeToUnits(tf);
+          const computeCost = u.cpuH * (ratesForPeriod.COMPUTE_USD_PER_CU_HOUR || 0);
+          const storageCost = u.avgStorageGB * (ratesForPeriod.STORAGE_USD_PER_GB_MONTH || 0);
+
+          // Estimated invoice — never overwrite a manual one.
+          const existingInv = bucket.invoices[month];
+          if (!existingInv || existingInv._estimated) {
+            bucket.invoices[month] = {
+              compute_cu_h: +u.cpuH.toFixed(4),
+              compute_cost: +computeCost.toFixed(2),
+              storage_root_gb: +u.avgStorageGB.toFixed(4),
+              storage_root_cost: +storageCost.toFixed(2),
+              total: +(computeCost + storageCost).toFixed(2),
+              _estimated: true,
+              _source: 'consumption_history',
+              _period_plan: planForPeriod,
+              _imported_at: new Date().toISOString(),
+            };
+            invoicesAdded++;
+          }
+
+          // Synthetic snapshot — never overwrite a live one (live snapshots
+          // carry per-endpoint detail that the consumption API doesn't
+          // expose, so the live data is strictly richer).
+          const existingSnap = bucket.snapshots.find(s => s.billing_month === month);
+          if (!existingSnap || existingSnap._estimated) {
+            const projects = [];
+            for (const ph of projHist) {
+              const pp = (ph.periods || []).find(p => monthFromIsoUtc(p.period_start) === month);
+              if (!pp) continue;
+              const ptf = (pp.consumption || [])[0];
+              if (!ptf) continue;
+              const pu = timeframeToUnits(ptf);
+              projects.push({
+                project_id: ph.project_id,
+                name: projNames[ph.project_id] || ph.project_id,
+                cpu_used_sec: pu.cpuSec,
+                active_time_sec: pu.activeSec,
+                storage_bytes: Math.round(pu.avgStorageBytes),
+                quota_reset_at: null,
+                endpoints: [],
+              });
+            }
+            const snap = {
+              captured_at: new Date().toISOString().replace(/\.\d+Z$/, 'Z'),
+              period_reset_at: period.period_end || null,
+              period_start_at: period.period_start || null,
+              billing_month: month,
+              org_id: o.id,
+              org_name: o.name,
+              org_plan: planForPeriod,
+              org_managed_by: o.managed_by,
+              projects,
+              _estimated: true,
+              _source: 'consumption_history',
+            };
+            mergeSnapshot(bucket, snap);
+            snapshotsAdded++;
+          }
+        }
+        summary.push({
+          org_id: o.id,
+          periods: acctPeriods.length,
+          months_seen: [...new Set(months)].sort(),
+          invoices_added: invoicesAdded,
+          snapshots_added: snapshotsAdded,
+        });
+      } catch (e) {
+        errors.push({ org_id: o.id, error: e.message });
+      }
+    }
+    await saveData(data);
+    res.json({ data, errors, summary });
+  } catch (e) {
+    console.error('[import-history]', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.delete('/api/invoice/:org_id/:month', async (req, res) => {
   try {
     const data = await loadData();
@@ -578,16 +829,33 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const PORT = Number(process.env.PORT) || 3000;
-app.listen(PORT, async () => {
-  console.log(`\n  Neon Consumption  →  http://localhost:${PORT}`);
-  // Log resolved config so users can immediately see if creds aren't loaded.
-  try {
-    const c = await loadConfig();
-    const keyState = c.api_key ? `set (${maskKey(c.api_key)})` : 'MISSING';
-    const orgState = c.orgs.length ? c.orgs.map(o => o.id).join(', ') : 'NONE';
-    console.log(`  api_key: ${keyState}`);
-    console.log(`  orgs:    ${orgState}\n`);
-  } catch (e) {
-    console.warn(`  could not load config: ${e.message}\n`);
-  }
-});
+const PORT_RETRY_LIMIT = 20;
+
+function startServer(port, attempt = 0) {
+  const server = app.listen(port, async () => {
+    if (port !== PORT) {
+      console.log(`\n  Port ${PORT} in use — using ${port} instead.`);
+    }
+    console.log(`\n  Neon Consumption  →  http://localhost:${port}`);
+    try {
+      const c = await loadConfig();
+      const keyState = c.api_key ? `set (${maskKey(c.api_key)})` : 'MISSING';
+      const orgState = c.orgs.length ? c.orgs.map(o => o.id).join(', ') : 'NONE';
+      console.log(`  api_key: ${keyState}`);
+      console.log(`  orgs:    ${orgState}\n`);
+    } catch (e) {
+      console.warn(`  could not load config: ${e.message}\n`);
+    }
+  });
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE' && attempt < PORT_RETRY_LIMIT) {
+      startServer(port + 1, attempt + 1);
+    } else {
+      console.error('\x1b[31m[listen error]\x1b[0m', err);
+      process.exit(1);
+    }
+  });
+}
+
+startServer(PORT);

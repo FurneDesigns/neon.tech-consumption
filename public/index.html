@@ -121,6 +121,7 @@
     .badge.idle { background: #f1f5f9; color: #64748b; }
     .badge.warn { background: #fef3c7; color: #92400e; }
     .badge.plan { background: #ede9fe; color: #5b21b6; text-transform: lowercase; }
+    .badge.est { background: #fef3c7; color: #92400e; text-transform: lowercase; }
 
     .stat-grid {
       display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
@@ -249,6 +250,14 @@
           </svg>
           Settings
         </button>
+        <button id="import-history" class="secondary icon-btn" type="button" title="Backfill estimated invoices and per-month history from the Neon consumption API">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          Import history
+        </button>
         <button id="refresh" class="icon-btn" type="button">
           <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
@@ -322,6 +331,6 @@
   </div>
 
   <div id="toast" class="toast hidden"></div>
-  <script type="module" src="/app.js?v=7"></script>
+  <script type="module" src="/app.js?v=8"></script>
 </body>
 </html>
